@@ -41,8 +41,8 @@ cat(
     }
     b[i] ~ dnorm(0, tau.zero)
   }
-  beta.zero ~ dnorm(260, 100)
-  beta.one ~ dnorm(0, 10)
+  beta.zero ~ dnorm(0, 1000)
+  beta.one ~ dnorm(0, 1000)
 
   tau ~ dgamma(1,0.0260)     # for measurement error
 	sigma.e <- 1.0/sqrt(tau)
