@@ -14,9 +14,7 @@ ratsdata<-data.frame(y = BodyWeight$weight[BodyWeight$Diet==1],
                      tj =  BodyWeight$Time[BodyWeight$Diet==1],
                      id = BodyWeight$Rat[BodyWeight$Diet==1])
 summary(ratsdata)
-# 
 
-################################################################
 library(R2jags)
 m <- 8
 n <- 11
@@ -41,8 +39,8 @@ cat(
     }
     b[i] ~ dnorm(0, tau.zero)
   }
-  beta.zero ~ dnorm(0, 1000)
-  beta.one ~ dnorm(0, 1000)
+  beta.zero ~ dnorm(0, 0.0001)
+  beta.one ~ dnorm(0, 0.0001)
 
   tau ~ dgamma(1,0.0260)     # for measurement error
 	sigma.e <- 1.0/sqrt(tau)
