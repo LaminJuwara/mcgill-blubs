@@ -1,0 +1,574 @@
+---
+title: "Regression under differential privacy"
+author: "LJ"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: yeti
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,  message=FALSE, warning=FALSE}
+library(readxl)
+library(data.table)
+library(xlsx)
+library(pROC)
+library(ROCR)
+library(tidyverse)
+library(caret)
+library(ggpubr)
+library(rms)
+library(dplyr)
+library(ggplot2)
+library(DT)
+library(tableone)
+library(glmnet)
+library(ncvreg)
+library(MASS)
+library(reshape2)
+library(Hmisc)
+library(sjPlot) # beautiful summaries
+library(sjmisc)
+library(sjlabelled)
+
+
+ljtheme <- theme_bw() + theme(panel.border = element_rect(color = "black", size = 2),
+                                 # Remove panel grid lines
+                                panel.grid.major = element_blank(),
+                                panel.grid.minor = element_blank())
+```
+
+#### Regression Analysis on differentially private synthetic datasets
+
+Data release without disclosure of personal information is increasingly challenging with recent
+technological advancements. Our presence in multiple databases (e.g. social media sites) increases
+the prospect of participant re-identification in de-identified dataset through linkage attacks. Differ-
+ential privacy (DP) provides a formal guarantee that an individual participant’s data would remain
+private. However, the utility of synthetic datasets generated through DP mechanisms are sometimes
+undesirable. Pooled (or aggregate) synthetic data has proven a reliable substitute for individual
+data without the formal privacy guarantees provided by DP mechanisms. To bridge this gap, we
+propose a hybrid mechanism, a pooled differentially private algorithm (PoolDiv), that utilizes a relax
+(, δ) privacy budget and the data aggregation techniques of pooling to generate synthetic data. We
+conduct extensive simulations to compare the performance of least square estimation on synthetic data
+generated from (1) traditional DP mechanisms (i.e. randomized response mechanism and histogram
+perturbation algorithm), (2) pooling data synthesis mechanism, and (3) PoolDiv. We assess the
+performance of the mechanism on simulated datasets and on real data.
+
+### simulate data here
+
+```{r,eval=T, echo=T, fig.align="center", fig.height=5, fig.width=5, warning=FALSE, message=F}
+
+# simulate the data
+sim_lsdata<-function(n=1000, p=4, sigma.star=1/2){
+  beta.star=rnorm(p)
+  X=cbind(1, matrix(rnorm(n*(p-1)), nrow=n, ncol=(p-1))) 
+  y=X%*%beta.star + sigma.star*rnorm(n)
+  data=data.frame(cbind(y,X)); 
+  colnames(data)<-c("y",paste0("X",0:(p-1),sep = ""))
+  dat<-data[,-2]
+  return(data.frame(dat) )
+}
+
+simdat = sim_lsdata(n=1000, p=4, sigma.star=1/2)
+
+
+xbar=apply(simdat, 2, mean); 
+simdat=scale(simdat, center=xbar, scale=FALSE)
+```
+
+
+#### Laplace mechanism
+
+```{r,eval=T, echo=T, fig.align="center", fig.height=3.4, fig.width=6, warning=FALSE, message=F}
+library(rmutil)
+lap_values = rlaplace(n = 1000,m = 0,s = 0.1)
+
+N = 1000
+r5 <- rlaplace(n = N,m = 0,s = 5)
+r4 <- rlaplace(n = N,m = 0,s = 4)
+r3 =  rlaplace(n = N,m = 0,s = 3)
+r2 <- rlaplace(n = N,m = 0,s = 2)
+r1 <- rlaplace(n = N,m = 0,s = 1)
+
+data_list<-list(eps5 = r5,eps4 = r4,eps3 = r3,eps2 = r2, eps1 = r1)
+
+data<- melt(data_list)
+
+ggplot(data,aes(x=value, col=L1)) + geom_density(alpha=0.25,size=0.8) + ljtheme  + 
+  scale_color_discrete(name = "Privacy budget",
+                 limits = c("eps1","eps2","eps3","eps4","eps5"),
+                 labels = c(paste(expression(epsilon),"=",1),
+                            paste(expression(epsilon),"=",2),
+                            paste(expression(epsilon),"=",3),
+                            paste(expression(epsilon),"=",4),
+                            paste(expression(epsilon),"=",5))) + xlim(c(-30,30)) +
+  theme(legend.position = c(0.8, 0.6),
+        legend.background = element_rect(fill="lightgray", 
+                                  size=0.5, linetype="solid"))
+
+```
+remark: laplace noise addition for continuous variable
+
+#### random mechanisns
+
+randomized response mechanism
+
+```{r,eval=T, echo=T, fig.align="center", fig.height=3.4, fig.width=6, warning=FALSE, message=F}
+
+alpha = beta = 0.5
+# the randomized mechanism
+random_mechanism = function(d, alpha=0.5, beta=0.5){
+  foo = function(d){
+  if(runif(1,0,1)<alpha){
+    return(d)
+    } 
+  else if(runif(1,0,1)<beta){
+      return(runif(n = 1,min = -5,max = 5))
+      }
+  else{ return(d)}
+  }
+  return(apply(as.matrix(d), 1, foo))
+}
+
+N = 10^4
+#data = rnorm(N,mean = 0,n = 25)
+data = simdat[,1]
+
+r2 <- random_mechanism(data,alpha = 0.9,beta = 0.75)
+r3 <- random_mechanism(data,alpha = 0.8,beta = 0.75)
+r4 =  random_mechanism(data,alpha = 0.5,beta = 0.75)
+r5 <- random_mechanism(data,alpha = 0.3,beta = 0.75)
+r1 <- data
+
+data_list<-list(r5 = r5,r4 = r4,r3 = r3,r2 = r2, r1 = r1)
+
+data<- melt(data_list)
+
+ggplot(data,aes(x=value, col=L1)) + geom_density(alpha=0.25,size=0.9) + ljtheme  + 
+  scale_color_discrete(name = "Randomization",
+                 limits = c("r1","r2","r3","r4","r5"),
+                 labels = c("non-random",
+                            paste(expression(a),"=",0.9),
+                            paste(expression(a),"=",0.8),
+                            paste(expression(a),"=",0.5),
+                            paste(expression(a),"=",0.3)))+
+  theme(legend.position = c(0.87, 0.67),
+        legend.background = element_rect(fill="lightgray", linetype="solid"))
+```
+remark: random mechanism sampling
+
+#### exponential mechanism
+
+```{r,eval=T, echo=T, fig.align="center", fig.height=3.4, fig.width=6, warning=FALSE, message=F}
+library(rmutil)
+gaus_values = rnorm(n = 1000,mean = 0,sd = 0.5)
+
+N = 1000
+r1 <- rnorm(n = 1000,mean = 0,sd = 1)
+r2 <- rnorm(n = 1000,mean = 0,sd = 2)
+r3 =  rnorm(n = 1000,mean = 0,sd = 3)
+r4 <- rnorm(n = 1000,mean = 0,sd = 4)
+r5 <- rnorm(n = 1000,mean = 0,sd = 5)
+
+data_list<-list(eps5 = r5,eps4 = r4,eps3 = r3,eps2 = r2, eps1 = r1)
+
+data<- melt(data_list)
+ggplot(data,aes(x=value, col=L1)) + geom_density(alpha=0.25,size=0.9) + ljtheme  +
+    scale_color_discrete(name = "noice level",
+                 limits = c("eps1","eps2","eps3","eps4","eps5"),
+                 labels = c(paste(expression(dispersion),"=",1),
+                            paste(expression(dispersion),"=",2),
+                            paste(expression(dispersion),"=",3),
+                            paste(expression(dispersion),"=",4),
+                            paste(expression(dispersion),"=",5))) +
+  theme(legend.position = c(0.8, 0.6),
+        legend.background = element_rect(fill="lightgray", 
+                                  size=0.5, linetype="solid"))
+
+```
+remark: see 064XXX.pdf
+
+
+### Generating synthetic data
+
+
+#### Algorithm 1: 
+- randomized function k for a binary dataset
+
+We use here a randomized algorithm to generate M multiple datasets each of budget $\epsilon /M$.
+
+
+```{r,eval=T, echo=T, fig.align="center", fig.height=3.5, fig.width=4, warning=FALSE, message=F}
+
+# Toy binary data
+ybinary<-ifelse(simdat[,1]>0.5,0,1)
+# assume a binomial likelihood for the data
+# sufficient stats
+ ybar = mean(ybinary)
+ 
+ # sample from binomial
+ data = ybinary
+ syn_private_binom<-function(data,alp1=0.9,alp2=1.75,n_out=500, epsil = 8){
+   if (min(alp1,alp2)<n_out/(exp(epsil)-1)) {
+     print("differential privacy condition not satisfied")
+   }
+   n = length(data)
+   x = sum(data)
+   Q =  seq(0, 1, length = n_out)
+   pbar = pbeta(q = Q,shape1 = alp1+x, shape2 = alp2+n-x)
+   result = rbinom(n = length(pbar),size = 1,prob = pbar)
+   return(ifelse(result>0,0,1))
+ }
+ 
+synval = syn_private_binom(data)
+#chisq.test(data,syntheticval)
+dat = data.frame(val=as.factor(c(synval,data)),
+                 category = c(rep("New",length(synval)),
+                              rep("Private",length(data))))
+
+#str(dat)
+vars = c("val")
+Table1<-CreateTableOne(vars = vars, strata = "category",
+                       data = dat, test = TRUE)
+print(Table1, smd=F,showAllLevels = TRUE,noSpaces = TRUE)
+levels(dat$category)<-c("Synthetic data","Private data")
+
+cat("Toy example for beta-binomial mechanism")
+ggplot(dat, aes(category, ..count..)) + geom_bar(aes(fill = val), position = "dodge") + ljtheme + 
+    scale_fill_discrete(name = "category") +
+  theme(legend.position = c(0.2, 0.8),
+        legend.background = element_rect(fill="lightgray", 
+                                  size=0.5, linetype="solid"))
+
+```
+
+Remark: synthetic binary distribution generation
+
+
+#### Algorithm II
+Histogram Perturbation for contingency tables. The algorithm is based on the contingency table representation of data
+
+```{r,eval=T, echo=T, fig.align="center", fig.height=5, fig.width=6, warning=FALSE, message=F}
+
+# Toy contingency table data
+JobSat <- matrix(c(1,2,1,0, 3,3,6,1, 10,10,14,9, 6,7,12,11), 4, 4)
+dimnames(JobSat) = list(income=c("< 15k", "15-25k", "25-40k", "> 40k"),
+                        satisfaction=c("VeryD", "LittleD", "ModerateS", "VeryS"))
+#as.data.frame(JobSat)
+JobSat <- as.table(JobSat)
+#str(JobSat)
+cat("private contingency table dataset")
+JobSat
+
+# For spliting continuous variables into quantiles
+qvals = function(X,P=seq(0,1,length.out = 20)){
+  val = table(cut(X, breaks = quantile(X,probs = P)))
+  return( as.matrix(val)[,1] )
+}
+#apply(simdat, 2, qvals)
+#dat = as.data.frame(apply(simdat, 2, qvals))
+
+# To measure the sensitivity of database
+Senseval = function(dat){ # privacy sensitivity
+  return(abs(max(dat)-min(dat)))
+}
+
+
+
+dat<-as.matrix(as.vector(JobSat))
+perturb_hist<-function(dat,epsil = 0.005){ # def histogram perturbation function
+  sense = Senseval(dat) 
+  noise = replicate(n = length(dat),
+                  expr = rlaplace(m = 0,s = epsil/sense))
+  di = dat/sum(dat) + noise
+  di_bar = ifelse(di<0,0,di)
+  pi_bar = di_bar/sum(di_bar)
+  return(pi_bar )
+}
+
+temp = matrix(as.vector(apply(dat, 2, perturb_hist)),nrow = 1)
+
+#sample from multinomial
+Xreturn = rMultinom(probs = temp,m = 16)
+
+syntheticdat = as.table(matrix(Xreturn,nrow = 4))
+rownames(syntheticdat)<-rownames(JobSat)
+colnames(syntheticdat)<-colnames(JobSat)
+
+syntheticdat = as.data.frame(syntheticdat)
+returnprivate<-as.data.frame(JobSat)
+
+colnames(syntheticdat)<-colnames(returnprivate)
+all_dat<-rbind(returnprivate,syntheticdat)
+all_dat$datatype<-c(rep("private",length(returnprivate$Freq)),
+                    rep("synthetic",length(syntheticdat$Freq)))
+
+all_data_flat = all_dat %>% 
+  slice(rep(1:n(), Freq)) 
+
+df = all_dat
+cat("Toy example with count data")
+ggplot(df, aes(income, Freq)) +
+  geom_bar(stat = "identity", position = position_dodge(0.8),width = 0.7,aes(fill = satisfaction))+
+  ylab("Count (N)") + xlab("Income") + #coord_flip() +
+  facet_grid(datatype ~., scales = "free")  + theme(axis.text.x = element_text(vjust = +.65,angle = 45, size = 0.15)) +
+  labs(subtitle="Private data vs synthetic data")+ 
+  scale_fill_hue(name = "Income satisfaction") + ljtheme +
+    theme(legend.position = "bottom",
+        legend.background = element_rect(fill="lightgray", 
+                                  size=0.5, linetype="solid"))
+
+```
+
+
+
+#### Algorithm III
+
+We use here the Multinomial-Dirichlet Synthesizer. The algorithm is specified in the manuscript.
+
+Remark: Not included in this assessment
+
+
+
+### Pooled synthetic data
+```{r,eval=T, echo=T, fig.align="center", fig.height=4, fig.width=4, warning=FALSE, message=F}
+
+# Function to create synthetic pool data
+pool<-function(poolsize=2,data){
+  G = poolsize;
+  n = dim(data)[1]
+  pools<-n/G
+  pooldata<-data.frame(matrix(0,nrow = pools,ncol = NCOL(data)))
+  colnames(pooldata)<-colnames(data)
+  if (poolsize==2) {
+    pooldata<-data[seq(1,n-1,G),]+data[seq(2,n,G),]
+  }
+  if (poolsize==4) {
+    
+    pooldata<-parse(text = paste(paste(paste("data[seq(",1:G,",n -G +",1:G,",G),] + "),
+                               collapse = ""),"0") )
+    pooldata = eval(pooldata)
+    }
+  
+  if (poolsize==6) {
+    
+    pooldata<-parse(text = paste(paste(paste("data[seq(",1:G,",n -G +",1:G,",G),] + "),
+                               collapse = ""),"0") )
+    pooldata = eval(pooldata)
+  }
+  
+  if (poolsize==10) {
+    pooldata<-parse(text = paste(paste(paste("data[seq(",1:G,",n -G +",1:G,",G),] + "),
+                               collapse = ""),"0") )
+    pooldata = eval(pooldata)
+  }
+  
+  return(pooldata)
+}
+
+
+poolsize=2
+pool2  = pool(poolsize=2,simdat)
+
+```
+
+
+### All the datasets for comparison
+
+- simulated data
+- differential private synthetic data using randomized algorithm
+- differential private synthetic data using histogram perturbation algorithm
+- pooled synthetic data
+- pooled differentially private synthetic data
+
+```{r,eval=T, echo=T, fig.align="center", fig.height=4, fig.width=4, warning=FALSE, message=F}
+simdat<-as.data.frame(simdat)
+train.control <- trainControl(method = "cv", number = 10, repeats = 5)
+
+simulated<-simdat
+diff_index<-random_mechanism(simdat[,1],alpha = 0.75,beta = 0.6)
+diff_randomized<-simdat
+diff_randomized$y<-diff_index; randomized_keep<-diff_randomized
+## histogram perturbation, used all_dat
+# laplace noise
+diff_laplace <-simdat
+laplace_mech<-function(data,epsil=3.5){
+  return(data + rlaplace(n = length(data),m = 0,s = epsil/(Senseval(data)))
+         )
+}
+diff_laplace<-apply(diff_laplace,2,laplace_mech)
+
+diff_hist<-all_data_flat
+pool2  = pool(poolsize=2,simdat)
+pool4  = pool(poolsize=4,simdat)
+pool6  = pool(poolsize=6,simdat)
+
+
+lm_private <- train(y ~., data = simulated, method = "lm",
+               trControl = train.control)
+cat("Resampled RMSE: Private data")
+lm_private
+
+
+lm_random <- train(y ~., data = diff_randomized, method = "lm",
+               trControl = train.control)
+cat("Resampled RMSE: Randomized response")
+lm_random
+
+
+lm_laplace <- train(y ~., data = diff_laplace, method = "lm",
+               trControl = train.control)
+cat("Resampled RMSE: Laplace noise perturbation")
+lm_laplace
+
+
+lm_pool2 <- train(y ~., data = pool2, method = "lm",
+               trControl = train.control)
+cat("Resampled RMSE: Pooled synthetic (g=2)")
+lm_pool2
+
+
+lm_pool4 <- train(y ~., data = pool4, method = "lm",
+               trControl = train.control)
+cat("Resampled RMSE: Pooled synthetic (g=4)")
+lm_pool4
+
+lm_pool6 <- train(y ~., data = pool6, method = "lm",
+               trControl = train.control)
+cat("Resampled RMSE: Pooled synthetic (g=6)")
+lm_pool6
+
+
+
+```
+
+
+### Compile the result
+
+```{r,eval=T, echo=T, fig.align="center", fig.height=5, fig.width=7, warning=FALSE, message=F}
+all_rslt<-rbind(
+lm_private$results[2:4],
+lm_random$results[2:4],
+lm_laplace$results[2:4],
+lm_pool2$results[2:4],
+lm_pool4$results[2:4],
+lm_pool6$results[2:4]
+)
+all_rslt$Data<-c("Private","Randomized","Laplace","Pool2","Pool4","Pool6")
+
+all_rslt_long<-gather(all_rslt,"Metric","Value",1:3)
+
+# plot all the results separated by the metric used fo rthe analysis 
+df = all_rslt_long
+ggplot(df, aes(Data, Value)) +
+  #geom_bar(stat = "identity",size=0.5, position = position_dodge(0.8),width = 0.7,aes(fill=Data)) +
+  geom_point(size=3) + 
+  geom_segment(aes(x=Data, 
+                   xend=Data, 
+                   y=0, 
+                   yend=Value)) + 
+  ylab("Measure") + xlab("Dataset") + coord_flip() +
+  facet_grid(Metric ~., scales = "free")  + 
+  theme(axis.text.x = element_text(vjust = +.65,angle = 45, size = 0.15)) +
+  labs(subtitle="Regression Analysis on datasets")+ 
+  scale_fill_hue(name = "") + ljtheme +
+    theme(legend.position = "none",
+        legend.background = element_rect(fill="lightgray", 
+                                  size=0.5, linetype="solid"))
+
+
+```
+
+
+
+```{r,eval=T, echo=T, fig.align="center", fig.height=5, fig.width=7, warning=FALSE, message=F}
+lm_private <- lm(y ~., data = simulated)
+lm_random <- lm(y ~., data = diff_randomized)
+lm_laplace <- lm(y ~., data = as.data.frame(diff_laplace) )
+lm_pool2 <- lm(y ~., data = pool2)
+lm_pool4 <- lm(y ~., data = pool4)
+lm_pool6 <- lm(y ~., data = pool6)
+
+vals=tab_model(lm_private,lm_random,lm_laplace,lm_pool2,lm_pool4,lm_pool6,show.p = F,auto.label = FALSE)
+vals
+```
+
+
+### Pooled epsilon differential data
+```{r,eval=T, echo=T, fig.align="center", fig.height=5, fig.width=7, warning=FALSE, message=F}
+
+divpool2  = pool(poolsize=2,randomized_keep)
+divpool4  = pool(poolsize=4,randomized_keep)
+divpool6  = pool(poolsize=6,randomized_keep)
+divpool10  = pool(poolsize=10,randomized_keep)
+
+lm_pool2 <- lm(y ~., data = divpool2)
+lm_pool4 <- lm(y ~., data = divpool4)
+lm_pool6 <- lm(y ~., data = divpool6)
+lm_pool10 <- lm(y ~., data = divpool10)
+
+tab_model(lm_pool2,lm_pool4,lm_pool6,lm_pool10)
+```
+
+
+### Real data example
+- Here we will look at a high dimensional data set with $p>>n$. We will use the lymphoma dataset used by Shipp et al. (2002). It consist of 58 individuals and 6817 gene expression profiles. The outcome is disease status (yes/no).
+
+```{r,eval=T, echo=T, fig.align="center", fig.height=5, fig.width=7, warning=FALSE, message=F}
+library(datamicroarray)
+
+# describe_data()
+data('shipp', package = 'datamicroarray')
+dim(shipp$x);table(shipp$y) # Always run directly in the console
+
+df<-scale(shipp$x[,1:100],center = T)
+y<-shipp$y
+
+library("d3heatmap")
+#d3heatmap(scale(df[,sample(1:100,25)]), colors = "RdYlBu")
+#heatmap(df[,sample(1:100,30)])
+
+library(gplots)
+cat("Private data")
+heatmap.2(df, scale = "none", col = bluered(100), 
+          trace = "none", density.info = "none",main = "[Private]")
+
+cat("randomized")
+# randomized private data
+diff_index<-random_mechanism(y,alpha = 0.75,beta = 0.6)
+diff_randomized<-as.matrix(df[which(y%in%c("DLBCL","FL")),])
+heatmap.2(diff_randomized, scale = "none", col = bluered(100), 
+          trace = "none", density.info = "none",main = "[Randomized]")
+
+##3 laplace noise addition
+cat("laplace data")
+diff_laplace<-apply(df,2,laplace_mech)
+heatmap.2(diff_laplace, scale = "none", col = bluered(100), 
+          trace = "none", density.info = "none",main = "[Laplace]")
+
+# pool2
+
+pool2  = pool(poolsize=2,df)
+pool4  = pool(poolsize=4,df)
+pool6  = pool(poolsize=6,df)
+cat("Pool 2")
+heatmap.2(pool2, scale = "none", col = bluered(100), 
+          trace = "none", density.info = "none",main = "[Pool-2]")
+cat("Pool 4")
+heatmap.2(pool4, scale = "none", col = bluered(100), 
+          trace = "none", density.info = "none",main = "[Pool-4]")
+
+cat("Pool 6")
+heatmap.2(pool6, scale = "none", col = bluered(100), 
+          trace = "none", density.info = "none",main = "[Pool-6]")
+
+```
+
+
+
